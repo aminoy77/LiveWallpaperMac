@@ -11,7 +11,7 @@ struct LiveWallpaperApp: App {
 
         Window("Live Wallpaper Settings", id: "settings") {
             SettingsView()
-                .frame(width: 420, height: 340)
+                .frame(minWidth: 440, minHeight: 340)
         }
         .windowResizability(.contentSize)
     }
@@ -83,8 +83,78 @@ struct SettingsView: View {
                 .padding(.vertical, 8)
                 Divider()
             }
+
+            // MARK: Playlist & rotation
+            Text("Playlist & rotation")
+                .font(.subheadline).foregroundColor(.secondary)
+                .padding(.top, 12)
+            ForEach(engine.playlist, id: \.self) { url in
+                HStack {
+                    Image(systemName: "play.rectangle")
+                        .foregroundColor(.secondary)
+                    Text(url.lastPathComponent)
+                        .lineLimit(1).truncationMode(.middle)
+                    Spacer()
+                    Button("Remove") { engine.removeFromPlaylist(url) }
+                        .buttonStyle(.link)
+                }
+            }
+            Button("Add to Playlist…") { engine.addToPlaylist() }
+                .padding(.vertical, 6)
+
+            Picker("Rotate", selection: $engine.rotationMode) {
+                ForEach(WallpaperEngine.RotationMode.allCases) { mode in
+                    Text(mode.label).tag(mode)
+                }
+            }
+            .pickerStyle(.menu)
+            .padding(.vertical, 6)
+
+            if engine.rotationMode == .everyN {
+                HStack {
+                    Stepper("Every \(engine.rotationMinutes) min",
+                            value: $engine.rotationMinutes, in: 1...240)
+                    Spacer()
+                }
+            }
+
+            if engine.rotationMode == .dayNight {
+                HStack {
+                    Text("Day").frame(width: 40, alignment: .leading)
+                    Text(engine.dayVideo?.lastPathComponent ?? "None")
+                        .font(.caption).foregroundColor(.secondary)
+                        .lineLimit(1).truncationMode(.middle)
+                    Button("Choose…") { chooseSlot { engine.dayVideo = $0 } }
+                    Spacer()
+                    Text("from").font(.caption).foregroundColor(.secondary)
+                    Stepper(value: $engine.dayStartHour, in: 0...23) {
+                        Text(String(format: "%02d:00", engine.dayStartHour))
+                            .font(.callout).monospacedDigit()
+                    }
+                }
+                HStack {
+                    Text("Night").frame(width: 40, alignment: .leading)
+                    Text(engine.nightVideo?.lastPathComponent ?? "None")
+                        .font(.caption).foregroundColor(.secondary)
+                        .lineLimit(1).truncationMode(.middle)
+                    Button("Choose…") { chooseSlot { engine.nightVideo = $0 } }
+                    Spacer()
+                    Text("from").font(.caption).foregroundColor(.secondary)
+                    Stepper(value: $engine.nightStartHour, in: 0...23) {
+                        Text(String(format: "%02d:00", engine.nightStartHour))
+                            .font(.callout).monospacedDigit()
+                    }
+                }
+            }
             Spacer()
         }
         .padding(16)
+    }
+
+    private func chooseSlot(_ set: @escaping (URL) -> Void) {
+        let p = NSOpenPanel()
+        p.allowedContentTypes = [.mpeg4Movie, .quickTimeMovie]
+        p.allowsMultipleSelection = false
+        if p.runModal() == .OK, let url = p.url { set(url) }
     }
 }

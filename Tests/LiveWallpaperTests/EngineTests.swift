@@ -23,6 +23,13 @@ final class EngineTests: XCTestCase {
         XCTAssertEqual(WallpaperEngine.videoForScreen("2", global: global, overrides: overrides), ext)
     }
 
+    func testDaySlotBoundaries() {
+        XCTAssertTrue(WallpaperEngine.isDaySlot(hour: 8, dayStart: 8, nightStart: 20))
+        XCTAssertTrue(WallpaperEngine.isDaySlot(hour: 12, dayStart: 8, nightStart: 20))
+        XCTAssertFalse(WallpaperEngine.isDaySlot(hour: 20, dayStart: 8, nightStart: 20))
+        XCTAssertFalse(WallpaperEngine.isDaySlot(hour: 3, dayStart: 8, nightStart: 20))
+    }
+
     func testBookmarkRoundTrip() throws {
         // Security-scoped bookmark survives persist/restore cycle
         let tmp = FileManager.default.temporaryDirectory.appendingPathComponent("lw-test-\(UUID().uuidString).mp4")

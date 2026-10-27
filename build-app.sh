@@ -14,7 +14,7 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
 <key>CFBundleExecutable</key><string>LiveWallpaper</string>
 <key>CFBundleIdentifier</key><string>com.local.livewallpaper</string>
 <key>CFBundleName</key><string>Live Wallpaper</string>
-<key>CFBundleVersion</key><string>1.1</string>
+<key>CFBundleVersion</key><string>1.2</string>
 <key>LSMinimumSystemVersion</key><string>13.0</string>
 <key>LSUIElement</key><true/>
 <key>NSHighResolutionCapable</key><true/>

@@ -6,6 +6,19 @@ import Combine
 final class WallpaperEngine: ObservableObject {
     static let shared = WallpaperEngine()
 
+    enum RotationMode: String, Codable, CaseIterable, Identifiable {
+        case off, onLoopEnd = "onLoopEnd", everyN = "everyN", dayNight
+        var id: String { rawValue }
+        var label: String {
+            switch self {
+            case .off: return "Off (single video)"
+            case .onLoopEnd: return "Change when video loops"
+            case .everyN: return "Change every N minutes"
+            case .dayNight: return "Day & night videos"
+            }
+        }
+    }
+
     @Published var videoURL: URL? {
         didSet { if !isRestoring { if let u = videoURL { saveBookmark(u) } ; play() } }
     }
@@ -20,17 +33,45 @@ final class WallpaperEngine: ObservableObject {
     @Published var pauseOnBattery = true
     @Published var pauseOnFullscreen = true
 
+    // MARK: Playlist & rotation
+    @Published var playlist: [URL] = [] {
+        didSet { guard !isRestoring else { return }; savePlaylist() }
+    }
+    @Published var rotationMode: RotationMode = .off {
+        didSet { guard !isRestoring else { return }; UserDefaults.standard.set(rotationMode.rawValue, forKey: "rotationMode"); scheduleRotation() }
+    }
+    @Published var rotationMinutes: Int = 15 {
+        didSet { guard !isRestoring, rotationMode == .everyN else { return }; UserDefaults.standard.set(rotationMinutes, forKey: "rotationMinutes"); scheduleRotation() }
+    }
+    @Published var dayVideo: URL? {
+        didSet { guard !isRestoring else { return }; saveSlotBookmark(dayVideo, key: "dayVideoBookmark"); scheduleRotation() }
+    }
+    @Published var nightVideo: URL? {
+        didSet { guard !isRestoring else { return }; saveSlotBookmark(nightVideo, key: "nightVideoBookmark"); scheduleRotation() }
+    }
+    @Published var dayStartHour: Int = 8 {
+        didSet { guard !isRestoring else { return }; UserDefaults.standard.set(dayStartHour, forKey: "dayStartHour"); scheduleRotation() }
+    }
+    @Published var nightStartHour: Int = 20 {
+        didSet { guard !isRestoring else { return }; UserDefaults.standard.set(nightStartHour, forKey: "nightStartHour"); scheduleRotation() }
+    }
+    /// Index of the playlist item currently playing as the global video.
+    @Published private(set) var playlistIndex: Int = 0
+
     private var players: [AVPlayer] = []
     private var windows: [NSWindow] = []
     private var loopObservers: [NSObjectProtocol] = []
     private var userPaused = false
     private var isRestoring = false
+    private var rotationTimer: Timer?
     private var cancellables = Set<AnyCancellable>()
 
     private init() {
         restoreBookmark()
         observeSystem()
     }
+
+    deinit { rotationTimer?.invalidate() }
 
     // MARK: - Public
 
@@ -72,6 +113,82 @@ final class WallpaperEngine: ObservableObject {
 
     func toggle() { isPlaying ? pause(user: true) : resume() }
 
+    // MARK: - Rotation
+
+    /// Pure slot decision for dayNight, extracted for unit testing.
+    static func isDaySlot(hour: Int, dayStart: Int, nightStart: Int) -> Bool {
+        hour >= dayStart && hour < nightStart
+    }
+
+    func addToPlaylist(_ url: URL? = nil) {
+        if let url = url {
+            playlist.append(url)
+            return
+        }
+        let p = NSOpenPanel()
+        p.allowedContentTypes = [.mpeg4Movie, .quickTimeMovie]
+        p.allowsMultipleSelection = true
+        if p.runModal() == .OK { playlist.append(contentsOf: p.urls) }
+        if rotationMode == .off, !playlist.isEmpty { rotationMode = .onLoopEnd }
+    }
+
+    func removeFromPlaylist(_ url: URL) {
+        playlist.removeAll { $0 == url }
+        if let current = videoURL, current == url, rotationMode != .off { applyRotation() }
+    }
+
+    private func nextInPlaylist() {
+        guard !playlist.isEmpty else { return }
+        playlistIndex = (playlistIndex + 1) % playlist.count
+        videoURL = playlist[playlistIndex]   // didSet persists + rebuilds panels
+    }
+
+    private func applyRotation() {
+        switch rotationMode {
+        case .off:
+            break
+        case .onLoopEnd, .everyN:
+            nextInPlaylist()
+        case .dayNight:
+            if let slot = Self.isDaySlot(hour: Calendar.current.component(.hour, from: Date()),
+                                         dayStart: dayStartHour,
+                                         nightStart: nightStartHour)
+                            ? dayVideo : nightVideo, slot != videoURL {
+                videoURL = slot
+            }
+        }
+    }
+
+    private func scheduleRotation() {
+        rotationTimer?.invalidate()
+        rotationTimer = nil
+        switch rotationMode {
+        case .off:
+            break
+        case .everyN:
+            let m = max(1, rotationMinutes)
+            rotationTimer = Timer.scheduledTimer(withTimeInterval: TimeInterval(m * 60), repeats: true) { [weak self] _ in
+                guard let self, !self.userPaused, !self.playlist.isEmpty else { return }
+                self.nextInPlaylist()
+            }
+        case .dayNight:
+            // Check slot every 30 s; switch only when the slot's video differs
+            rotationTimer = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in
+                self?.applyDayNightIfChanged()
+            }
+        case .onLoopEnd:
+            break // handled by AVPlayerItemDidPlayToEndTime
+        }
+    }
+
+    private func applyDayNightIfChanged() {
+        guard rotationMode == .dayNight, !userPaused else { return }
+        let isDay = Self.isDaySlot(hour: Calendar.current.component(.hour, from: Date()),
+                                   dayStart: dayStartHour, nightStart: nightStartHour)
+        let target = isDay ? dayVideo : nightVideo
+        if let target, target != videoURL { videoURL = target }
+    }
+
     func pause(user: Bool = false) {
         if user { userPaused = true }
         players.forEach { $0.pause() }
@@ -79,7 +196,7 @@ final class WallpaperEngine: ObservableObject {
     }
 
     func resume() {
-        guard videoURL != nil else { return }
+        guard videoURL != nil || !screenVideos.isEmpty else { return }
         userPaused = false
         players.forEach { $0.play() }
         isPlaying = true
@@ -111,13 +228,19 @@ final class WallpaperEngine: ObservableObject {
             let player = AVPlayer(url: url)
             player.volume = volume
             player.actionAtItemEnd = .none
-            // Seamless loop, no re-buffer
+            // Seamless loop, no re-buffer. With rotation=onLoopEnd, first player
+            // to finish advances the playlist (which rebuilds all panels).
             let token = NotificationCenter.default.addObserver(
                 forName: .AVPlayerItemDidPlayToEndTime,
                 object: player.currentItem, queue: .main
-            ) { [weak player] _ in
-                player?.seek(to: .zero)
-                player?.play()
+            ) { [weak player, weak self] _ in
+                guard let self else { player?.seek(to: .zero); player?.play(); return }
+                if self.rotationMode == .onLoopEnd, !self.playlist.isEmpty {
+                    self.nextInPlaylist()
+                } else {
+                    player?.seek(to: .zero)
+                    player?.play()
+                }
             }
             loopObservers.append(token)
             // HW decode: no filters, direct layer. Bounds (not screen.frame: origin differs per monitor).
@@ -196,7 +319,7 @@ final class WallpaperEngine: ObservableObject {
         ) { [weak self] _ in self?.pause() }
     }
 
-    // MARK: - Persistence (bookmark survives reboot)
+    // MARK: - Persistence (bookmarks survive reboot)
 
     private func saveBookmark(_ url: URL) {
         if let data = try? url.bookmarkData(options: .withSecurityScope, includingResourceValuesForKeys: nil, relativeTo: nil) {
@@ -217,40 +340,53 @@ final class WallpaperEngine: ObservableObject {
         UserDefaults.standard.set(dict, forKey: "screenBookmarks")
     }
 
+    private func savePlaylist() {
+        let marks = playlist.compactMap { try? $0.bookmarkData(options: .withSecurityScope, includingResourceValuesForKeys: nil, relativeTo: nil) }
+        UserDefaults.standard.set(marks, forKey: "playlistBookmarks")
+        UserDefaults.standard.set(playlistIndex, forKey: "playlistIndex")
+    }
+
+    private func saveSlotBookmark(_ url: URL?, key: String) {
+        if let url, let data = try? url.bookmarkData(options: .withSecurityScope, includingResourceValuesForKeys: nil, relativeTo: nil) {
+            UserDefaults.standard.set(data, forKey: key)
+        } else {
+            UserDefaults.standard.removeObject(forKey: key)
+        }
+    }
+
+    private func resolveBookmark(_ data: Data) -> URL? {
+        var stale = false
+        guard let url = try? URL(resolvingBookmarkData: data, options: .withSecurityScope, relativeTo: nil, bookmarkDataIsStale: &stale) else { return nil }
+        _ = url.startAccessingSecurityScopedResource()
+        return url
+    }
+
     private func restoreBookmark() {
         volume = UserDefaults.standard.object(forKey: "volume") as? Float ?? 0
-        var restored: [String: URL] = [:]
+        isRestoring = true
+        defer { isRestoring = false }
+
+        var screens: [String: URL] = [:]
         if let dict = UserDefaults.standard.dictionary(forKey: "screenBookmarks") as? [String: Data] {
-            for (key, data) in dict {
-                var stale = false
-                if let url = try? URL(resolvingBookmarkData: data, options: .withSecurityScope, relativeTo: nil, bookmarkDataIsStale: &stale) {
-                    _ = url.startAccessingSecurityScopedResource()
-                    restored[key] = url
-                }
-            }
+            for (key, data) in dict { if let url = resolveBookmark(data) { screens[key] = url } }
         }
-        guard let data = UserDefaults.standard.data(forKey: "videoBookmark") else {
-            if !restored.isEmpty {
-                isRestoring = true
-                screenVideos = restored
-                isRestoring = false
-                DispatchQueue.main.async { [weak self] in self?.play() }
-            }
-            return
-        }
-        var stale = false
-        if let url = try? URL(resolvingBookmarkData: data, options: .withSecurityScope, relativeTo: nil, bookmarkDataIsStale: &stale) {
-            _ = url.startAccessingSecurityScopedResource()
-            isRestoring = true
-            screenVideos = restored
-            isRestoring = false
-            // Defer play until app finished launching (screens exist)
-            DispatchQueue.main.async { [weak self] in self?.videoURL = url }
-        } else if !restored.isEmpty {
-            isRestoring = true
-            screenVideos = restored
-            isRestoring = false
-            DispatchQueue.main.async { [weak self] in self?.play() }
+        screenVideos = screens
+        playlist = ((UserDefaults.standard.array(forKey: "playlistBookmarks") as? [Data]) ?? []).compactMap { resolveBookmark($0) }
+        playlistIndex = playlist.isEmpty
+            ? 0
+            : min(UserDefaults.standard.integer(forKey: "playlistIndex"), playlist.count - 1)
+        dayVideo = UserDefaults.standard.data(forKey: "dayVideoBookmark").flatMap { resolveBookmark($0) }
+        nightVideo = UserDefaults.standard.data(forKey: "nightVideoBookmark").flatMap { resolveBookmark($0) }
+        rotationMode = RotationMode(rawValue: UserDefaults.standard.string(forKey: "rotationMode") ?? "") ?? .off
+
+        let global = UserDefaults.standard.data(forKey: "videoBookmark").flatMap { resolveBookmark($0) }
+        // Defer play until app finished launching (screens exist)
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            if let global { self.videoURL = global }  // didSet persists + play()
+            else { self.play() }
+            self.scheduleRotation()
+            if self.rotationMode == .dayNight { self.applyDayNightIfChanged() }
         }
     }
 }
