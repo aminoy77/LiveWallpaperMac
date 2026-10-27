@@ -63,7 +63,7 @@ h1 em{font-style:italic;font-weight:400;color:var(--accent)}
   border:1px solid var(--line);background:#0a0c10;
   box-shadow:0 24px 60px -24px rgba(0,0,0,.8);
 }
-.mock canvas{position:absolute;inset:0;width:100%;height:100%;display:block}
+.mock video{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;display:block}
 .mock .menubar{
   position:relative;z-index:2;height:26px;display:flex;align-items:center;gap:6px;
   padding:0 10px;font-size:10.5px;color:rgba(233,228,218,.85);
@@ -81,6 +81,10 @@ h1 em{font-style:italic;font-weight:400;color:var(--accent)}
   font-family:var(--mono);font-size:11px;color:rgba(233,228,218,.75);
   background:rgba(10,12,16,.6);border:1px solid rgba(255,255,255,.08);
   border-radius:8px;padding:5px 9px;
+}
+.credit{
+  margin-top:10px;text-align:center;
+  font-family:var(--mono);font-size:12px;color:var(--muted);
 }
 
 /* ── spec strip ── */
@@ -152,13 +156,15 @@ footer .sig{font-family:var(--display);font-style:italic;color:var(--muted)}
     </div>
 
     <figure class="mock" aria-label="Preview: an aurora video playing as the macOS desktop wallpaper, controlled from the menu bar">
-      <canvas class="aurora" aria-hidden="true"></canvas>
+      <video class="aurora" src="demo.mp4" autoplay muted loop playsinline aria-hidden="true"></video>
+      <!-- Demo video is open source by lawlaw91 — attribution required below -->
       <div class="menubar" aria-hidden="true">
         <b>Finder</b><span>File</span><span>Edit</span><span>View</span>
         <span class="live">Live Wallpaper</span>
       </div>
-      <figcaption>4K · 60 fps · muted</figcaption>
+      <figcaption>4K · 60 fps · muted · video by lawlaw91</figcaption>
     </figure>
+    <p class="credit">Say 'thanks' to lawlaw91! This helps keep the creative spirit going!</p>
   </header>
 
   <div class="strip">
@@ -223,76 +229,14 @@ footer .sig{font-family:var(--display);font-style:italic;color:var(--muted)}
 </div>
 
 <script>
-// Live demo: animated aurora on the mock desktop.
-// Hover = pause (like the app auto-pausing), reduced-motion = still frame.
+// Demo video: hover = pause (like the app auto-pausing), reduced motion = paused.
 (function(){
   const mock = document.querySelector('.mock');
-  const cv = mock.querySelector('canvas');
-  const ctx = cv.getContext('2d');
-  const reduced = matchMedia('(prefers-reduced-motion: reduce)');
-  let w = 0, h = 0, paused = false, raf = 0;
-
-  const BLOBS = [
-    {c:'126,231,196', a:.42},  // aurora teal
-    {c:'122,160,255', a:.30},  // night blue
-    {c:'255,180,84',  a:.22},  // cabin window amber
-  ];
-  const STREAKS = [
-    {c:'126,231,196'}, {c:'126,231,196'}, {c:'122,160,255'},
-    {c:'126,231,196'}, {c:'255,180,84'},
-  ];
-
-  function resize(){
-    const r = mock.getBoundingClientRect(), d = devicePixelRatio || 1;
-    w = r.width; h = r.height;
-    cv.width = w*d; cv.height = h*d;
-    ctx.setTransform(d,0,0,d,0,0);
-  }
-
-  function draw(t){
-    ctx.clearRect(0,0,w,h);
-    // slow-drifting color fields
-    ctx.globalCompositeOperation = 'lighter';
-    BLOBS.forEach((b,i)=>{
-      const x = w*(.3+.28*Math.sin(t*.00021+i*2.1)),
-            y = h*(.45+.32*Math.cos(t*.00017+i*1.7)),
-            r = Math.max(w,h)*(.3+.05*Math.sin(t*.0003+i));
-      const g = ctx.createRadialGradient(x,y,0,x,y,r);
-      g.addColorStop(0, `rgba(${b.c},${b.a})`);
-      g.addColorStop(1, `rgba(${b.c},0)`);
-      ctx.fillStyle = g;
-      ctx.fillRect(0,0,w,h);
-    });
-    // aurora curtains: vertical bands that sway
-    STREAKS.forEach((s,i)=>{
-      const bw = w*.09;
-      const x = w*(.15+.14*i) + w*.06*Math.sin(t*.0004+i*1.9);
-      const wave = .5+.5*Math.sin(t*.0009+i*2.4);
-      const g = ctx.createLinearGradient(x,h,x-bw*.7,h*.35);
-      g.addColorStop(0, `rgba(${s.c},${.16+.14*wave})`);
-      g.addColorStop(1, `rgba(${s.c},0)`);
-      ctx.fillStyle = g;
-      ctx.beginPath();
-      ctx.ellipse(x-bw*.35, h*.75, bw, h*.55, -.06, 0, Math.PI*2);
-      ctx.fill();
-    });
-    ctx.globalCompositeOperation = 'source-over';
-  }
-
-  function loop(ts){
-    if(!paused) draw(ts);
-    raf = requestAnimationFrame(loop);
-  }
-
-  mock.addEventListener('pointerenter', ()=>paused=true);
-  mock.addEventListener('pointerleave', ()=>paused=false);
-  document.addEventListener('visibilitychange', ()=>paused=document.hidden||paused);
-  new ResizeObserver(resize).observe(mock);
-
-  resize();
-  if(reduced.matches){ draw(12000); }   // one still frame
-  else { raf = requestAnimationFrame(loop); }
-  reduced.addEventListener?.('change', ()=>location.reload());
+  const v = mock.querySelector('video');
+  v.muted = true; v.play?.().catch(()=>{});  // autoplay policies
+  mock.addEventListener('pointerenter', ()=>v.pause());
+  mock.addEventListener('pointerleave', ()=>v.play().catch(()=>{}));
+  if(matchMedia('(prefers-reduced-motion: reduce)').matches) v.pause();
 })();
 </script>
 </body>
