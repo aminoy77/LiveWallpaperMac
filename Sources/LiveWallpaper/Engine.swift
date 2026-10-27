@@ -7,7 +7,11 @@ final class WallpaperEngine: ObservableObject {
     static let shared = WallpaperEngine()
 
     @Published var videoURL: URL? {
-        didSet { if let u = videoURL { saveBookmark(u); play(url: u) } }
+        didSet { if !isRestoring { if let u = videoURL { saveBookmark(u) } ; play() } }
+    }
+    /// Per-display override keyed by CGDirectDisplayID. Missing key → global videoURL.
+    @Published var screenVideos: [String: URL] = [:] {
+        didSet { guard !isRestoring else { return }; saveScreenBookmarks(); play() }
     }
     @Published var isPlaying = false
     @Published var volume: Float = 0 { // muted by default = less CPU
@@ -20,6 +24,7 @@ final class WallpaperEngine: ObservableObject {
     private var windows: [NSWindow] = []
     private var loopObservers: [NSObjectProtocol] = []
     private var userPaused = false
+    private var isRestoring = false
     private var cancellables = Set<AnyCancellable>()
 
     private init() {
@@ -29,15 +34,40 @@ final class WallpaperEngine: ObservableObject {
 
     // MARK: - Public
 
-    func chooseVideo() {
+    /// Stable display identifier (CGDirectDisplayID, lives across spaces/rebuilds).
+    static func key(for screen: NSScreen) -> String {
+        String((screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? Int) ?? 0)
+    }
+
+    /// Pure mapping, extracted for unit testing.
+    static func videoForScreen(_ key: String, global: URL?, overrides: [String: URL]) -> URL? {
+        overrides[key] ?? global
+    }
+
+    func videoURL(for screen: NSScreen) -> URL? {
+        Self.videoForScreen(Self.key(for: screen), global: videoURL, overrides: screenVideos)
+    }
+
+    func hasOverride(for screen: NSScreen) -> Bool {
+        screenVideos[Self.key(for: screen)] != nil
+    }
+
+    func chooseVideo(for screen: NSScreen? = nil) {
         let p = NSOpenPanel()
         p.allowedContentTypes = [.mpeg4Movie, .quickTimeMovie]
         p.allowsMultipleSelection = false
         p.canChooseDirectories = false
-        if p.runModal() == .OK, let url = p.url {
-            // ponytail: security-scoped bookmark only, no file copy (4K files stay in place)
+        guard p.runModal() == .OK, let url = p.url else { return }
+        // ponytail: security-scoped bookmark only, no file copy (4K files stay in place)
+        if let screen = screen {
+            screenVideos[Self.key(for: screen)] = url
+        } else {
             videoURL = url
         }
+    }
+
+    func clearOverride(for screen: NSScreen) {
+        screenVideos.removeValue(forKey: Self.key(for: screen))
     }
 
     func toggle() { isPlaying ? pause(user: true) : resume() }
@@ -62,7 +92,7 @@ final class WallpaperEngine: ObservableObject {
     }
 
     private func autoResume() {
-        guard !userPaused, videoURL != nil else { return }
+        guard !userPaused, videoURL != nil || !screenVideos.isEmpty else { return }
         players.forEach { $0.play() }
         isPlaying = true
     }
@@ -71,9 +101,13 @@ final class WallpaperEngine: ObservableObject {
 
     // MARK: - Core
 
-    private func play(url: URL) {
+    /// Builds one panel+player per screen. Each screen plays its override video,
+    /// falling back to the global videoURL; screens with no video anywhere get none.
+    private func play() {
         teardown()
+        var startedAny = false
         for screen in NSScreen.screens {
+            guard let url = videoURL(for: screen) else { continue }
             let player = AVPlayer(url: url)
             player.volume = volume
             player.actionAtItemEnd = .none
@@ -112,8 +146,10 @@ final class WallpaperEngine: ObservableObject {
 
             players.append(player)
             windows.append(w)
+            startedAny = true
         }
-        // ponytail: autostart avoids re-seek cost; players share one asset
+        guard startedAny else { isPlaying = false; return }
+        // ponytail: autostart avoids re-seek cost
         players.forEach { $0.play() }
         isPlaying = true
     }
@@ -152,7 +188,7 @@ final class WallpaperEngine: ObservableObject {
         NotificationCenter.default.addObserver(
             forName: NSApplication.didChangeScreenParametersNotification,
             object: nil, queue: .main
-        ) { [weak self] _ in if let u = self?.videoURL { self?.play(url: u) } }
+        ) { [weak self] _ in self?.play() }
         // Screensaver / lock pauses decode
         DistributedNotificationCenter.default().addObserver(
             forName: NSNotification.Name("com.apple.screensaver.didstart"),
@@ -171,14 +207,50 @@ final class WallpaperEngine: ObservableObject {
         }
     }
 
+    private func saveScreenBookmarks() {
+        var dict: [String: Data] = [:]
+        for (key, url) in screenVideos {
+            if let data = try? url.bookmarkData(options: .withSecurityScope, includingResourceValuesForKeys: nil, relativeTo: nil) {
+                dict[key] = data
+            }
+        }
+        UserDefaults.standard.set(dict, forKey: "screenBookmarks")
+    }
+
     private func restoreBookmark() {
         volume = UserDefaults.standard.object(forKey: "volume") as? Float ?? 0
-        guard let data = UserDefaults.standard.data(forKey: "videoBookmark") else { return }
+        var restored: [String: URL] = [:]
+        if let dict = UserDefaults.standard.dictionary(forKey: "screenBookmarks") as? [String: Data] {
+            for (key, data) in dict {
+                var stale = false
+                if let url = try? URL(resolvingBookmarkData: data, options: .withSecurityScope, relativeTo: nil, bookmarkDataIsStale: &stale) {
+                    _ = url.startAccessingSecurityScopedResource()
+                    restored[key] = url
+                }
+            }
+        }
+        guard let data = UserDefaults.standard.data(forKey: "videoBookmark") else {
+            if !restored.isEmpty {
+                isRestoring = true
+                screenVideos = restored
+                isRestoring = false
+                DispatchQueue.main.async { [weak self] in self?.play() }
+            }
+            return
+        }
         var stale = false
         if let url = try? URL(resolvingBookmarkData: data, options: .withSecurityScope, relativeTo: nil, bookmarkDataIsStale: &stale) {
             _ = url.startAccessingSecurityScopedResource()
+            isRestoring = true
+            screenVideos = restored
+            isRestoring = false
             // Defer play until app finished launching (screens exist)
             DispatchQueue.main.async { [weak self] in self?.videoURL = url }
+        } else if !restored.isEmpty {
+            isRestoring = true
+            screenVideos = restored
+            isRestoring = false
+            DispatchQueue.main.async { [weak self] in self?.play() }
         }
     }
 }
